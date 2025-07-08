@@ -9,6 +9,7 @@ using AssetRipper.GUI.Web.Pages.Scenes;
 using AssetRipper.GUI.Web.Pages.Settings;
 using AssetRipper.GUI.Web.Paths;
 using AssetRipper.Import.Logging;
+using AssetRipper.Import.Utils;
 using AssetRipper.Web.Extensions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -22,7 +23,6 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Photino.NET;
 using SwaggerThemes;
-using System.CommandLine;
 using System.Diagnostics;
 
 namespace AssetRipper.GUI.Web;
@@ -31,7 +31,7 @@ public static class WebApplicationLauncher
 {
 	public static PhotinoWindow? PhotinoWindow { get; private set; }
 
-	private static class Defaults
+	internal static class Defaults
 	{
 		public const int Port = 0;
 		public const bool LaunchBrowser = true;
@@ -41,77 +41,33 @@ public static class WebApplicationLauncher
 
 	public static void Launch(string[] args)
 	{
-		RootCommand rootCommand = new() { Description = "AssetRipper" };
+		Arguments? arguments = Arguments.Parse(args);
 
-		Option<int> portOption = new Option<int>(
-			name: "--port",
-			description: "If nonzero, the application will attempt to host on this port, instead of finding a random unused port.",
-			getDefaultValue: () => Defaults.Port);
-		rootCommand.AddOption(portOption);
-
-		Option<bool> launchBrowserOption = new Option<bool>(
-			name: "--launch-browser",
-			description: "If true, a browser window will be launched automatically.",
-			getDefaultValue: () => Defaults.LaunchBrowser);
-		rootCommand.AddOption(launchBrowserOption);
-
-		Option<bool> logOption = new Option<bool>(
-			name: "--log",
-			description: "If true, the application will log to a file.",
-			getDefaultValue: () => Defaults.Log);
-		rootCommand.AddOption(logOption);
-
-		Option<string?> logPathOption = new Option<string?>(
-			name: "--log-path",
-			description: "The file location at which to save the log, or a sensible default if not provided.",
-			getDefaultValue: () => Defaults.LogPath);
-		rootCommand.AddOption(logPathOption);
-
-		Option<string[]> localWebFilesOption = new Option<string[]>(
-			name: "--local-web-file",
-			description: "Files provided with this option will replace online sources.",
-			getDefaultValue: () => []);
-		rootCommand.AddOption(localWebFilesOption);
-
-		bool shouldRun = false;
-		int port = Defaults.Port;
-		bool launchBrowser = Defaults.LaunchBrowser;
-		bool log = Defaults.Log;
-		string? logFile = Defaults.LogPath;
-
-		rootCommand.SetHandler((int portParsed, bool launchBrowserParsed, bool logParsed, string? logFileParsed, string[] localWebFilesParsed) =>
+		if (arguments is null)
 		{
-			shouldRun = true;
-			port = portParsed;
-			launchBrowser = launchBrowserParsed;
-			log = logParsed;
-			logFile = logFileParsed;
-			foreach (string localWebFile in localWebFilesParsed)
-			{
-				if (File.Exists(localWebFile))
-				{
-					string fileName = Path.GetFileName(localWebFile);
-					string webPrefix = Path.GetExtension(fileName) switch
-					{
-						".css" => "/css/",
-						".js" => "/js/",
-						_ => "/"
-					};
-					StaticContentLoader.Add(webPrefix + fileName, File.ReadAllBytes(localWebFile));
-				}
-				else
-				{
-					Console.WriteLine($"File '{localWebFile}' does not exist.");
-				}
-			}
-		}, portOption, launchBrowserOption, logOption, logPathOption, localWebFilesOption);
-
-		rootCommand.Invoke(args);
-
-		if (shouldRun)
-		{
-			Launch(port, launchBrowser, log, logFile);
+			return;
 		}
+
+		foreach (string localWebFile in arguments.LocalWebFiles ?? [])
+		{
+			if (File.Exists(localWebFile))
+			{
+				string fileName = Path.GetFileName(localWebFile);
+				string webPrefix = Path.GetExtension(fileName) switch
+				{
+					".css" => "/css/",
+					".js" => "/js/",
+					_ => "/"
+				};
+				StaticContentLoader.Add(webPrefix + fileName, File.ReadAllBytes(localWebFile));
+			}
+			else
+			{
+				Console.WriteLine($"File '{localWebFile}' does not exist.");
+			}
+		}
+
+		Launch(arguments.Port, arguments.LaunchBrowser, arguments.Log, arguments.LogPath);
 	}
 
 	public static void Launch(int port = Defaults.Port, bool launchBrowser = Defaults.LaunchBrowser, bool log = Defaults.Log, string? logPath = Defaults.LogPath)
@@ -120,7 +76,12 @@ public static class WebApplicationLauncher
 
 		if (log)
 		{
-			Logger.Add(string.IsNullOrEmpty(logPath) ? new FileLogger() : new FileLogger(logPath));
+			if (string.IsNullOrEmpty(logPath))
+			{
+				logPath = ExecutingDirectory.Combine($"AssetRipper_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+				RotateLogs(logPath);
+			}
+			Logger.Add(new FileLogger(logPath));
 		}
 		Logger.LogSystemInformation("AssetRipper");
 		Logger.Add(new ConsoleLogger());
@@ -427,6 +388,33 @@ public static class WebApplicationLauncher
 		catch (Exception ex)
 		{
 			Logger.Error($"Failed to launch web browser for: {url}", ex);
+		}
+	}
+
+	private static void RotateLogs(string path)
+	{
+		const int MaxLogFiles = 5;
+		string? directory = Path.GetDirectoryName(path);
+		if (directory is null)
+		{
+			return;
+		}
+
+		FileInfo[] logFiles = new DirectoryInfo(directory)
+			.GetFiles("AssetRipper_*.log")
+			.OrderBy(f => f.Name)
+			.ToArray();
+
+		for (int i = 0; i <= logFiles.Length - MaxLogFiles; i++)
+		{
+			try
+			{
+				logFiles[i].Delete();
+			}
+			catch (IOException)
+			{
+				// Could not delete log file, ignore
+			}
 		}
 	}
 }
